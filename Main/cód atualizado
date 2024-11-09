@@ -1,0 +1,140 @@
+#include <WiFi.h>
+#include <ThingSpeak.h>
+#include "DHT.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define DHTPIN 15           
+#define DHTTYPE DHT22       
+#define pinValvula 2        
+#define leituras 24        
+
+float valores_ET[leituras];
+int indiceET = 0;           
+unsigned long tempodecorrido = 0;  
+unsigned long tempoligado = 0;     
+float TI = 0;                      
+
+DHT dht(DHTPIN, DHTTYPE); 
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const char* ssid = "Medley"; 
+const char* password = "M23A09B21"; 
+WiFiClient client;
+unsigned long myChannelNumber = 2735946;
+const char * myWriteAPIKey = "7EKE3FX2Y45P7SQI";
+
+float media15min = 0;
+float mediaHora = 0;
+float mediaDia = 0;
+int countHora = 0;
+int countDia = 0;
+
+void setup() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+  }
+  ThingSpeak.begin(client);
+
+  Wire.begin();
+  lcd.begin();
+  lcd.backlight();
+  lcd.print("Iniciando...");
+
+  dht.begin();
+  delay(2000);
+
+  pinMode(pinValvula, OUTPUT);
+}
+
+void loop() {
+    if (millis() - tempodecorrido >= 1000) {
+        float h = dht.readHumidity();
+        float t = dht.readTemperature();
+
+        if (isnan(h) || isnan(t)) {
+            lcd.clear();
+            lcd.print("Erro leitura DHT");
+        } else {
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Umidade: ");
+            lcd.print(h);
+            lcd.print("%");
+            lcd.setCursor(0, 1);
+            lcd.print("Temp: ");
+            lcd.print(t);
+            lcd.print("C");
+
+            float kl = 0.71;
+            float kc = 0.40;
+            float es = 0.6108 * exp((17.27 * t) / (t + 237.3));
+            float ea = (es * h) / 100;
+            float et0 = (2.5982 * pow((1 + (t / 25)), 2) * (1 - (ea / es))) + 0.797;
+            float et = et0 * kc * kl;
+
+            valores_ET[indiceET] = et;
+            media15min += et;
+            countHora++;
+
+            if (indiceET == (leituras - 1)) {
+                float soma_et = 0;
+                for (int i = 0; i < leituras; i++) {
+                    soma_et += valores_ET[i];
+                }
+
+                mediaHora = soma_et / leituras;
+                countDia++;
+                mediaDia += mediaHora;
+
+                float N = 1;
+                float q = 2.1;
+                float A = 0.35;
+                float ia = (N * q) / A;
+                float LB = (soma_et / leituras) / ia * kl;
+                TI = (LB / ia) * 60;
+
+                lcd.clear();
+                lcd.setCursor(0, 0);
+                lcd.print("ET Media:");
+                lcd.print(soma_et / leituras);
+                lcd.setCursor(0, 1);
+                lcd.print("Irrig: ");
+                lcd.print(TI);
+                lcd.print(" min");
+
+                digitalWrite(pinValvula, HIGH);
+
+                ThingSpeak.setField(1, t);                   
+                ThingSpeak.setField(2, h);                   
+                ThingSpeak.setField(3, media15min / leituras);
+                ThingSpeak.setField(4, mediaHora);            
+
+                if (countDia == 24) {
+                    mediaDia /= countDia;
+                    ThingSpeak.setField(5, mediaDia);         
+                    mediaDia = 0;
+                    countDia = 0;
+                }
+                ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+
+                indiceET = 0;
+                tempoligado = 0;
+                media15min = 0;
+            } else {
+                indiceET++;
+            }
+            tempodecorrido = millis();
+        }
+    }
+
+    if (tempoligado >= TI * 60000) {
+        digitalWrite(pinValvula, LOW);
+        tempoligado = 0;
+        TI = 0;
+    }
+
+    tempoligado += 10;
+    delay(10);
+}
